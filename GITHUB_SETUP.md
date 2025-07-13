@@ -142,8 +142,8 @@ python -m build
 Use the full Python path: `C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m build`
 
 This creates two files in the `dist/` directory:
-- `k8s_helper-0.1.0.tar.gz` (source distribution)
-- `k8s_helper-0.1.0-py3-none-any.whl` (wheel distribution)
+- `k8s_helper_cli-0.1.2.tar.gz` (source distribution)
+- `k8s_helper_cli-0.1.2-py3-none-any.whl` (wheel distribution)
 
 ### 2. Check Package Before Upload
 ```bash
@@ -162,7 +162,7 @@ C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m twine che
 python -m twine upload --repository testpypi dist/*
 
 # Test install from TestPyPI
-pip install --index-url https://test.pypi.org/simple/ k8s-helper
+pip install --index-url https://test.pypi.org/simple/ k8s-helper-cli
 ```
 
 **Windows with virtual environment:**
@@ -184,7 +184,7 @@ C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m twine upl
 ### 5. Verify Publication
 ```bash
 # Install from PyPI
-pip install k8s-helper
+pip install k8s-helper-cli
 
 # Test it works
 k8s-helper --help
