@@ -20,7 +20,7 @@ from .utils import (
     create_service_manifest
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 __author__ = "Harshit Chatterjee"
 __email__ = "harshitchatterjee50@gmail.com"
 

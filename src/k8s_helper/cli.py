@@ -23,9 +23,23 @@ from .utils import (
     parse_env_vars,
     parse_labels
 )
+from . import __version__
+
+def version_callback(value: bool):
+    """Version callback for the CLI"""
+    if value:
+        typer.echo(f"k8s-helper-cli version {__version__}")
+        raise typer.Exit()
 
 app = typer.Typer(help="k8s-helper: Simplified Kubernetes operations")
 console = Console()
+
+@app.callback()
+def main(
+    version: Optional[bool] = typer.Option(None, "--version", callback=version_callback, is_eager=True, help="Show version and exit")
+):
+    """Main callback to handle global options"""
+    return
 
 # Global options
 namespace_option = typer.Option(None, "--namespace", "-n", help="Kubernetes namespace")
