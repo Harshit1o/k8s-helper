@@ -498,6 +498,9 @@ k8s-helper provides a command-line interface for Kubernetes operations. After in
 # Show help
 k8s-helper --help
 
+# Show version
+k8s-helper --version
+
 # Configure settings
 k8s-helper config --namespace my-namespace
 k8s-helper config --output-format yaml

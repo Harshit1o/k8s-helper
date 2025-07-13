@@ -8,10 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--version` option to CLI to show installed version
 - Initial release of k8s-helper
 - Complete Kubernetes resource management
 - CLI interface with rich output
 - Comprehensive documentation and examples
+
+### Fixed
+- Version consistency between `__init__.py` and `pyproject.toml`
 
 ## [0.1.0] - 2025-01-11
 
