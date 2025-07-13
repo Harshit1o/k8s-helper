@@ -16,7 +16,7 @@ A simplified Python wrapper for common Kubernetes operations that makes it easy 
 ## Installation
 
 ```bash
-pip install k8s-helper
+pip install k8s-helper-cli
 ```
 
 ### Development Installation
@@ -32,6 +32,29 @@ pip install -e .
 - Python 3.8+
 - kubectl configured with access to a Kubernetes cluster
 - Kubernetes cluster (local or remote)
+
+**Important**: k8s-helper requires an active Kubernetes cluster connection. Without a properly configured kubectl and accessible cluster, the commands will fail with configuration errors.
+
+### Setting up Kubernetes (Choose one):
+
+1. **Local Development**: 
+   - [minikube](https://minikube.sigs.k8s.io/docs/start/)
+   - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/)
+   - [Docker Desktop](https://docs.docker.com/desktop/kubernetes/) (Enable Kubernetes)
+
+2. **Cloud Providers**:
+   - [Google Kubernetes Engine (GKE)](https://cloud.google.com/kubernetes-engine)
+   - [Amazon Elastic Kubernetes Service (EKS)](https://aws.amazon.com/eks/)
+   - [Azure Kubernetes Service (AKS)](https://azure.microsoft.com/en-us/services/kubernetes-service/)
+
+3. **Verify Setup**:
+   ```bash
+   # Check if kubectl is configured
+   kubectl cluster-info
+   
+   # List nodes to verify cluster access
+   kubectl get nodes
+   ```
 
 ## Quick Start
 
@@ -464,3 +487,464 @@ MIT License - see LICENSE file for details.
 - Comprehensive error handling
 - Multiple output formats
 - Quick convenience functions
+
+## CLI Usage
+
+k8s-helper provides a command-line interface for Kubernetes operations. After installation, you can use the `k8s-helper` command directly in your terminal.
+
+### Available Commands
+
+```bash
+# Show help
+k8s-helper --help
+
+# Configure settings
+k8s-helper config --namespace my-namespace
+k8s-helper config --output-format yaml
+k8s-helper config --timeout 300
+k8s-helper config --show  # Show current configuration
+```
+
+### Pod Management
+
+```bash
+# Create a pod
+k8s-helper create-pod my-pod nginx:latest --namespace my-namespace
+
+# Delete a pod
+k8s-helper delete-pod my-pod --namespace my-namespace
+
+# List pods
+k8s-helper list-pods --namespace my-namespace
+k8s-helper list-pods --output yaml
+
+# Get pod logs
+k8s-helper logs my-pod --namespace my-namespace
+```
+
+### Deployment Management
+
+```bash
+# Create a deployment
+k8s-helper create-deployment my-app nginx:latest --replicas 3 --namespace my-namespace
+
+# Scale a deployment
+k8s-helper scale-deployment my-app --replicas 5 --namespace my-namespace
+
+# Delete a deployment
+k8s-helper delete-deployment my-app --namespace my-namespace
+
+# List deployments
+k8s-helper list-deployments --namespace my-namespace
+k8s-helper list-deployments --output yaml
+```
+
+### Service Management
+
+```bash
+# Create a service
+k8s-helper create-service my-service --port 80 --target-port 8080 --type ClusterIP --namespace my-namespace
+
+# Delete a service
+k8s-helper delete-service my-service --namespace my-namespace
+
+# List services
+k8s-helper list-services --namespace my-namespace
+k8s-helper list-services --output yaml
+```
+
+### Monitoring and Events
+
+```bash
+# Get events
+k8s-helper events --namespace my-namespace
+
+# Get namespace status
+k8s-helper status --namespace my-namespace
+
+# Describe resources
+k8s-helper describe pod my-pod --namespace my-namespace
+k8s-helper describe deployment my-app --namespace my-namespace
+k8s-helper describe service my-service --namespace my-namespace
+```
+
+### Application Deployment
+
+```bash
+# Deploy a complete application (deployment + service)
+k8s-helper apply my-app nginx:latest --replicas 3 --port 80 --service-type LoadBalancer --namespace my-namespace
+
+# Clean up an application (delete deployment + service)
+k8s-helper cleanup my-app --namespace my-namespace
+```
+
+### Basic Examples
+
+#### Deploy a Web Application
+```bash
+# Deploy nginx with 3 replicas and LoadBalancer service
+k8s-helper apply webapp nginx:latest --replicas 3 --port 80 --service-type LoadBalancer
+
+# Check deployment status
+k8s-helper list-deployments
+k8s-helper list-services
+k8s-helper status
+```
+
+#### Deploy a Database
+```bash
+# Deploy postgres
+k8s-helper create-deployment postgres-db postgres:13 --replicas 1
+k8s-helper create-service postgres-service --port 5432 --target-port 5432 --type ClusterIP
+
+# Check logs
+k8s-helper logs postgres-db
+```
+
+#### Scale Applications
+```bash
+# Scale web application
+k8s-helper scale-deployment webapp --replicas 5
+
+# Check scaling
+k8s-helper list-deployments
+```
+
+#### Clean Up
+```bash
+# Clean up the web application
+k8s-helper cleanup webapp
+
+# Or delete components individually
+k8s-helper delete-deployment postgres-db
+k8s-helper delete-service postgres-service
+```
+
+### Configuration
+
+```bash
+# Set default namespace
+k8s-helper config --namespace production
+
+# Set output format
+k8s-helper config --output-format yaml
+
+# Show current configuration
+k8s-helper config --show
+```
+
+### Output Formats
+
+The CLI supports different output formats:
+
+```bash
+# Table format (default)
+k8s-helper list-pods
+
+# YAML format
+k8s-helper list-pods --output yaml
+
+# JSON format
+k8s-helper list-pods --output json
+```
+
+### Environment Variables
+
+```bash
+# Set default namespace
+export K8S_HELPER_NAMESPACE=my-namespace
+
+# Set output format
+export K8S_HELPER_OUTPUT_FORMAT=yaml
+
+# Now all commands will use these defaults
+k8s-helper list-pods
+```
+
+### Shell Completion
+
+```bash
+# Install completion for bash
+k8s-helper --install-completion bash
+
+# Install completion for zsh
+k8s-helper --install-completion zsh
+
+# Show completion script
+k8s-helper --show-completion bash
+```
+
+## Real-World Examples
+
+### 1. Simple Web Application
+
+```bash
+# Deploy a web application
+k8s-helper apply webapp nginx:latest --replicas 3 --port 80 --service-type LoadBalancer
+
+# Check deployment
+k8s-helper list-deployments
+k8s-helper list-services
+k8s-helper status
+```
+
+### 2. Database Setup
+
+```bash
+# Deploy PostgreSQL database
+k8s-helper create-deployment postgres-db postgres:13 --replicas 1
+k8s-helper create-service postgres-service --port 5432 --target-port 5432 --type ClusterIP
+
+# Check database
+k8s-helper logs postgres-db
+k8s-helper describe deployment postgres-db
+```
+
+### 3. Multi-Environment Deployment
+
+```bash
+# Production
+k8s-helper config --namespace production
+k8s-helper apply webapp myapp:v1.0.0 --replicas 5 --port 8080 --service-type LoadBalancer
+
+# Staging
+k8s-helper config --namespace staging
+k8s-helper apply webapp myapp:v1.1.0-rc1 --replicas 2 --port 8080 --service-type ClusterIP
+
+# Development
+k8s-helper config --namespace development
+k8s-helper apply webapp myapp:latest --replicas 1 --port 8080 --service-type NodePort
+```
+
+### 4. Application Scaling
+
+```bash
+# Scale up for high traffic
+k8s-helper scale-deployment webapp --replicas 10
+
+# Monitor scaling
+k8s-helper list-deployments
+k8s-helper events
+
+# Scale down after traffic reduces
+k8s-helper scale-deployment webapp --replicas 3
+```
+
+### 5. Debugging and Monitoring
+
+```bash
+# Get comprehensive status
+k8s-helper status
+k8s-helper list-deployments
+k8s-helper list-pods
+k8s-helper list-services
+
+# Check logs
+k8s-helper logs webapp
+
+# Get events
+k8s-helper events
+
+# Describe resources
+k8s-helper describe deployment webapp
+k8s-helper describe service webapp-service
+```
+
+### 6. Clean Up
+
+```bash
+# Clean up complete application
+k8s-helper cleanup webapp
+
+# Or clean up individual components
+k8s-helper delete-deployment postgres-db
+k8s-helper delete-service postgres-service
+```
+
+## Best Practices
+
+### 1. Resource Management
+```bash
+# Use appropriate replica counts for high availability
+k8s-helper apply my-app nginx:latest --replicas 3
+
+# Monitor resource usage
+k8s-helper status
+k8s-helper list-deployments
+```
+
+### 2. Environment Management
+```bash
+# Use different namespaces for different environments
+k8s-helper config --namespace production
+k8s-helper config --namespace staging  
+k8s-helper config --namespace development
+```
+
+### 3. Service Types
+```bash
+# Use ClusterIP for internal services
+k8s-helper create-service internal-api --port 8080 --type ClusterIP
+
+# Use LoadBalancer for external access
+k8s-helper create-service public-web --port 80 --type LoadBalancer
+```
+
+### 4. Monitoring and Debugging
+```bash
+# Regular health checks
+k8s-helper status
+k8s-helper events
+
+# Log monitoring
+k8s-helper logs my-app
+```
+
+### 5. Configuration Management
+```bash
+# Set sensible defaults
+k8s-helper config --namespace my-app
+k8s-helper config --output-format yaml
+```
+
+## Limitations
+
+**Important**: k8s-helper requires an active Kubernetes cluster connection to function. The CLI and Python API will fail if:
+
+- No kubectl configuration is found (`~/.kube/config`)
+- No active Kubernetes cluster is available
+- kubectl is not properly configured
+
+### Current CLI Limitations:
+
+- **Resource limits**: `--cpu-limit` and `--memory-limit` options are not implemented
+- **Advanced logging**: `--tail`, `--follow`, `--container` options are not available
+- **Advanced options**: Some documented options like `--env`, `--labels` may not be available in all commands
+- **Batch operations**: Multiple resource operations in single commands are not supported
+- **Advanced monitoring**: `--watch`, `--since`, `--all-namespaces` options are not implemented
+
+### Error Handling:
+
+If you see errors like:
+```
+ConfigException: Invalid kube-config file. No configuration found.
+ConfigException: Service host/port is not set.
+```
+
+This means you need to:
+1. Install and configure kubectl
+2. Set up access to a Kubernetes cluster
+3. Verify with `kubectl cluster-info`
+
+The CLI provides core functionality for basic Kubernetes operations. For advanced features, use the Python API directly or kubectl.
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Kubernetes Configuration Errors
+
+**Error**: `ConfigException: Invalid kube-config file. No configuration found.`
+
+**Solution**:
+```bash
+# Check if kubectl is installed
+kubectl version --client
+
+# Check if kubectl is configured
+kubectl cluster-info
+
+# If not configured, set up a cluster (example with minikube)
+minikube start
+```
+
+#### 2. Cluster Connection Issues
+
+**Error**: `ConfigException: Service host/port is not set.`
+
+**Solution**:
+```bash
+# Verify cluster is running
+kubectl get nodes
+
+# Check current context
+kubectl config current-context
+
+# Switch context if needed
+kubectl config use-context <context-name>
+```
+
+#### 3. Namespace Issues
+
+**Error**: `Namespace 'xyz' not found`
+
+**Solution**:
+```bash
+# List all namespaces
+kubectl get namespaces
+
+# Create namespace if needed
+kubectl create namespace <namespace-name>
+
+# Or use default namespace
+k8s-helper config --namespace default
+```
+
+#### 4. Permission Issues
+
+**Error**: `Forbidden: User cannot list pods`
+
+**Solution**:
+```bash
+# Check current user permissions
+kubectl auth can-i list pods
+
+# Check RBAC settings
+kubectl get clusterrolebinding
+```
+
+### Testing Without a Cluster
+
+If you want to test the package without a real Kubernetes cluster, you can:
+
+1. **Use minikube** (recommended for development):
+   ```bash
+   # Install minikube
+   # Windows: choco install minikube
+   # macOS: brew install minikube
+   # Linux: curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+   
+   # Start minikube
+   minikube start
+   
+   # Test k8s-helper
+   k8s-helper list-pods
+   ```
+
+2. **Use kind** (Kubernetes in Docker):
+   ```bash
+   # Install kind
+   # Windows: choco install kind
+   # macOS: brew install kind
+   # Linux: curl -Lo kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+   
+   # Create cluster
+   kind create cluster
+   
+   # Test k8s-helper
+   k8s-helper list-pods
+   ```
+
+3. **Use Docker Desktop** (if you have Docker Desktop):
+   ```bash
+   # Enable Kubernetes in Docker Desktop settings
+   # Then test
+   k8s-helper list-pods
+   ```
+
+### Getting Help
+
+- **Documentation**: Check this README for usage examples
+- **GitHub Issues**: [Report bugs or request features](https://github.com/Harshit1o/k8s-helper/issues)
+- **Kubernetes Docs**: [Official Kubernetes documentation](https://kubernetes.io/docs/)
+- **kubectl Reference**: [kubectl command reference](https://kubernetes.io/docs/reference/kubectl/)

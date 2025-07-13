@@ -1,12 +1,12 @@
 [project]
-name = "k8s-helper"
-version = "0.1.0"
+name = "k8s-helper-cli"
+version = "0.1.2"
 description = "A simplified Python wrapper for common Kubernetes operations"
 readme = "README.md"
 authors = [
   { name = "Harshit Chatterjee", email = "harshitchatterjee50@gmail.com" }
 ]
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.8"
 dependencies = [
   "kubernetes>=26.1.0",

@@ -93,44 +93,102 @@ If you plan to publish to PyPI:
 3. Add your repository
 4. Get the upload token and add as `CODECOV_TOKEN` secret
 
-## 🏷️ Creating Your First Release
+## 📦 Publishing to PyPI
 
-### 1. Create a Tag
+### 0. Set Up PyPI Account and API Token
+**Before you can publish, you need:**
+
+1. **Create accounts:**
+   - [PyPI Account](https://pypi.org/account/register/) (for production)
+   - [TestPyPI Account](https://test.pypi.org/account/register/) (for testing)
+
+2. **Get API tokens:**
+   - Go to [PyPI Account Settings](https://pypi.org/manage/account/) → API tokens
+   - Create a new token with "Entire account" scope
+   - Copy the token (starts with `pypi-`)
+   - Do the same for [TestPyPI](https://test.pypi.org/manage/account/)
+
+3. **Configure authentication:**
+   ```bash
+   # Create .pypirc file in your home directory
+   # Windows: C:\Users\hp\.pypirc
+   # Add this content:
+   [distutils]
+   index-servers =
+       pypi
+       testpypi
+
+   [pypi]
+   repository = https://upload.pypi.org/legacy/
+   username = __token__
+   password = pypi-YOUR_PYPI_TOKEN_HERE
+
+   [testpypi]
+   repository = https://test.pypi.org/legacy/
+   username = __token__
+   password = pypi-YOUR_TESTPYPI_TOKEN_HERE
+   ```
+
+### 1. Build the Package
 ```bash
-git tag -a v0.1.0 -m "Release v0.1.0: Initial release"
-git push origin v0.1.0
+# Make sure you're in the k8s-helper directory
+cd "C:\Users\hp\OneDrive\Documents\Open-source\k8s-helper"
+
+# Build the package (you've already done this!)
+python -m build
 ```
 
-### 2. Create Release on GitHub
-1. Go to your repository
-2. Click "Releases" → "Create a new release"
-3. Choose tag: `v0.1.0`
-4. Release title: `v0.1.0 - Initial Release`
-5. Add description from CHANGELOG.md
-6. Click "Publish release"
+**Important for Windows with virtual environment:**
+Use the full Python path: `C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m build`
 
-This will trigger the CI/CD pipeline and potentially publish to PyPI if configured.
+This creates two files in the `dist/` directory:
+- `k8s_helper-0.1.0.tar.gz` (source distribution)
+- `k8s_helper-0.1.0-py3-none-any.whl` (wheel distribution)
 
-## 📊 Repository Settings Recommendations
+### 2. Check Package Before Upload
+```bash
+# Check if the package is valid
+python -m twine check dist/*
+```
 
-### 1. General Settings
-- Enable "Issues" for bug tracking
-- Enable "Wiki" for additional documentation
-- Enable "Discussions" for community
+**Windows with virtual environment:**
+```bash
+C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m twine check dist/*
+```
 
-### 2. Code Security
-- Enable "Dependency graph"
-- Enable "Dependabot security updates"
-- Enable "Secret scanning"
+### 3. Test Upload to TestPyPI (Optional but Recommended)
+```bash
+# Upload to TestPyPI first
+python -m twine upload --repository testpypi dist/*
 
-### 3. Repository Topics
-Add topics to help people find your project:
-- `kubernetes`
-- `python`
-- `cli`
-- `devops`
-- `k8s`
-- `container-orchestration`
+# Test install from TestPyPI
+pip install --index-url https://test.pypi.org/simple/ k8s-helper
+```
+
+**Windows with virtual environment:**
+```bash
+C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m twine upload --repository testpypi dist/*
+```
+
+### 4. Upload to PyPI
+```bash
+# Upload to the real PyPI
+python -m twine upload dist/*
+```
+
+**Windows with virtual environment:**
+```bash
+C:/Users/hp/OneDrive/Documents/Open-source/.venv/Scripts/python.exe -m twine upload dist/*
+```
+
+### 5. Verify Publication
+```bash
+# Install from PyPI
+pip install k8s-helper
+
+# Test it works
+k8s-helper --help
+```
 
 ## 🎯 Next Steps After Push
 
