@@ -5,8 +5,13 @@ A simplified Python wrapper for common Kubernetes operations that makes it easy 
 ## Features
 
 - ✅ **Pod Management**: Create, delete, and list pods
-- ✅ **Deployment Management**: Create, delete, scale, and list deployments
-- ✅ **Service Management**: Create, delete, and list services
+- ✅ **Deployment Management**: Create, delete, scale, and list deployments with init containers
+- ✅ **Service Management**: Create, delete, list services with URL retrieval
+- ✅ **AWS EKS Integration**: Create and manage EKS clusters with automatic configuration
+- ✅ **Secrets Management**: Create, list, and delete Kubernetes secrets
+- ✅ **Persistent Volume Claims**: Create, list, and delete PVCs with multiple access modes
+- ✅ **Service URL Discovery**: Get service URLs including AWS ELB DNS names
+- ✅ **Advanced Deployments**: Support for init containers, volume mounts, and complex configurations
 - ✅ **Resource Monitoring**: Get logs, events, and resource descriptions
 - ✅ **Easy Configuration**: Simple configuration management
 - ✅ **Formatted Output**: Beautiful table, YAML, and JSON output formats
@@ -34,6 +39,13 @@ pip install -e .
 - Kubernetes cluster (local or remote)
 
 **Important**: k8s-helper requires an active Kubernetes cluster connection. Without a properly configured kubectl and accessible cluster, the commands will fail with configuration errors.
+
+### AWS EKS Features Prerequisites
+
+For AWS EKS integration features:
+- AWS CLI configured with appropriate credentials (`aws configure`)
+- AWS IAM permissions for EKS, EC2, and IAM operations
+- boto3 package (automatically installed with k8s-helper-cli)
 
 ### Setting up Kubernetes (Choose one):
 
@@ -675,6 +687,112 @@ k8s-helper --install-completion zsh
 
 # Show completion script
 k8s-helper --show-completion bash
+```
+
+### AWS EKS Integration
+
+```bash
+# Create an EKS cluster
+k8s-helper create-eks-cluster my-cluster --region us-west-2 --version 1.29
+
+# Create EKS cluster with custom settings
+k8s-helper create-eks-cluster my-cluster \
+  --region us-east-1 \
+  --instance-types t3.medium,t3.large \
+  --min-size 2 \
+  --max-size 10 \
+  --desired-size 3 \
+  --node-group my-nodes \
+  --wait
+
+# Note: Requires AWS credentials configured (aws configure)
+```
+
+### Secrets Management
+
+```bash
+# Create a secret
+k8s-helper create-secret my-secret --data "username=admin,password=secret123"
+
+# Create a TLS secret
+k8s-helper create-secret tls-secret --data "tls.crt=cert_content,tls.key=key_content" --type kubernetes.io/tls
+
+# List secrets
+k8s-helper list-secrets --namespace my-namespace
+
+# Delete a secret
+k8s-helper delete-secret my-secret --namespace my-namespace
+```
+
+### Persistent Volume Claims (PVC)
+
+```bash
+# Create a PVC
+k8s-helper create-pvc my-storage 10Gi --access-modes ReadWriteOnce
+
+# Create PVC with specific storage class
+k8s-helper create-pvc my-storage 50Gi --storage-class fast-ssd --access-modes ReadWriteMany
+
+# List PVCs
+k8s-helper list-pvcs --namespace my-namespace
+
+# Delete a PVC
+k8s-helper delete-pvc my-storage --namespace my-namespace
+```
+
+### Service URL Retrieval
+
+```bash
+# Get service URL (including AWS ELB URLs)
+k8s-helper service-url my-service --namespace my-namespace
+
+# Watch for URL changes (useful for LoadBalancer provisioning)
+k8s-helper service-url my-service --watch --namespace my-namespace
+
+# Shows:
+# - ClusterIP access information
+# - NodePort URLs
+# - AWS ELB DNS names for LoadBalancer services
+# - External IPs and hostnames
+```
+
+### Enhanced Application Deployment
+
+```bash
+# Deploy with init container
+k8s-helper apply my-app nginx:latest \
+  --init-container "init-db:postgres:13:pg_isready -h db" \
+  --init-env "PGHOST=db,PGPORT=5432"
+
+# Deploy with PVC mount
+k8s-helper apply my-app nginx:latest \
+  --pvc "my-storage:/data" \
+  --replicas 2
+
+# Deploy with secret mount
+k8s-helper apply my-app nginx:latest \
+  --secret "my-secret:/etc/secrets" \
+  --port 8080
+
+# Deploy with LoadBalancer and show URL
+k8s-helper apply my-app nginx:latest \
+  --service-type LoadBalancer \
+  --wait \
+  --show-url
+
+# Complex deployment with multiple features
+k8s-helper apply my-app nginx:latest \
+  --replicas 3 \
+  --port 8080 \
+  --service-type LoadBalancer \
+  --env "ENV=production,DEBUG=false" \
+  --labels "app=my-app,version=v1.0" \
+  --init-container "migrate:migrate-tool:latest:migrate up" \
+  --init-env "DB_HOST=postgres,DB_PORT=5432" \
+  --secret "db-secret:/etc/db" \
+  --pvc "app-storage:/var/data" \
+  --wait \
+  --show-url
 ```
 
 ## Real-World Examples
