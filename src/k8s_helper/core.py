@@ -2,7 +2,210 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from typing import Dict, List, Optional, Any
 import yaml
+import time
+import base64
+import boto3
+import json
+from botocore.exceptions import ClientError, NoCredentialsError
 
+
+class EKSClient:
+    """AWS EKS client for cluster management"""
+    
+    def __init__(self, region: str = "us-west-2"):
+        """Initialize EKS client
+        
+        Args:
+            region: AWS region for EKS operations
+        """
+        self.region = region
+        try:
+            self.eks_client = boto3.client('eks', region_name=region)
+            self.ec2_client = boto3.client('ec2', region_name=region)
+            self.iam_client = boto3.client('iam', region_name=region)
+        except (NoCredentialsError, ClientError) as e:
+            raise Exception(f"AWS credentials not found or invalid: {e}")
+    
+    def create_cluster(self, cluster_name: str, version: str = "1.29", 
+                      subnets: List[str] = None, security_groups: List[str] = None,
+                      role_arn: str = None, node_group_name: str = None,
+                      instance_types: List[str] = None, ami_type: str = "AL2_x86_64",
+                      capacity_type: str = "ON_DEMAND", scaling_config: Dict = None) -> Dict:
+        """Create an EKS cluster
+        
+        Args:
+            cluster_name: Name of the EKS cluster
+            version: Kubernetes version
+            subnets: List of subnet IDs
+            security_groups: List of security group IDs
+            role_arn: IAM role ARN for the cluster
+            node_group_name: Name for the node group
+            instance_types: List of EC2 instance types
+            ami_type: AMI type for nodes
+            capacity_type: Capacity type (ON_DEMAND or SPOT)
+            scaling_config: Scaling configuration for node group
+            
+        Returns:
+            Dict containing cluster information
+        """
+        try:
+            # Use default values if not provided
+            if subnets is None:
+                subnets = self._get_default_subnets()
+            
+            if role_arn is None:
+                role_arn = self._create_or_get_cluster_role()
+            
+            if instance_types is None:
+                instance_types = ["t3.medium"]
+            
+            if scaling_config is None:
+                scaling_config = {
+                    "minSize": 1,
+                    "maxSize": 3,
+                    "desiredSize": 2
+                }
+            
+            # Create cluster
+            cluster_response = self.eks_client.create_cluster(
+                name=cluster_name,
+                version=version,
+                roleArn=role_arn,
+                resourcesVpcConfig={
+                    'subnetIds': subnets,
+                    'securityGroupIds': security_groups or [],
+                    'endpointConfigPublic': True,
+                    'endpointConfigPrivate': True
+                },
+                logging={
+                    'enable': True,
+                    'types': ['api', 'audit', 'authenticator', 'controllerManager', 'scheduler']
+                }
+            )
+            
+            cluster_info = {
+                'cluster_name': cluster_name,
+                'status': 'CREATING',
+                'cluster_arn': cluster_response['cluster']['arn'],
+                'endpoint': cluster_response['cluster'].get('endpoint', 'Not available yet'),
+                'version': version,
+                'role_arn': role_arn,
+                'subnets': subnets,
+                'created_at': cluster_response['cluster']['createdAt']
+            }
+            
+            # If node group name is provided, we'll create it after cluster is active
+            if node_group_name:
+                cluster_info['node_group_name'] = node_group_name
+                cluster_info['instance_types'] = instance_types
+                cluster_info['scaling_config'] = scaling_config
+            
+            return cluster_info
+            
+        except ClientError as e:
+            raise Exception(f"Failed to create EKS cluster: {e}")
+    
+    def _get_default_subnets(self) -> List[str]:
+        """Get default subnets for EKS cluster"""
+        try:
+            response = self.ec2_client.describe_subnets()
+            subnets = []
+            for subnet in response['Subnets']:
+                if subnet['State'] == 'available':
+                    subnets.append(subnet['SubnetId'])
+            
+            if len(subnets) < 2:
+                raise Exception("Need at least 2 subnets for EKS cluster")
+            
+            return subnets[:2]  # Return first 2 available subnets
+            
+        except ClientError as e:
+            raise Exception(f"Failed to get default subnets: {e}")
+    
+    def _create_or_get_cluster_role(self) -> str:
+        """Create or get IAM role for EKS cluster"""
+        role_name = "eks-cluster-role"
+        
+        try:
+            # Check if role exists
+            response = self.iam_client.get_role(RoleName=role_name)
+            return response['Role']['Arn']
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchEntity':
+                # Create the role
+                trust_policy = {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "eks.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                }
+                
+                response = self.iam_client.create_role(
+                    RoleName=role_name,
+                    AssumeRolePolicyDocument=json.dumps(trust_policy),
+                    Description="EKS cluster role created by k8s-helper"
+                )
+                
+                # Attach required policies
+                policies = [
+                    "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+                ]
+                
+                for policy in policies:
+                    self.iam_client.attach_role_policy(
+                        RoleName=role_name,
+                        PolicyArn=policy
+                    )
+                
+                return response['Role']['Arn']
+            else:
+                raise Exception(f"Failed to create or get cluster role: {e}")
+    
+    def get_cluster_status(self, cluster_name: str) -> Dict:
+        """Get EKS cluster status"""
+        try:
+            response = self.eks_client.describe_cluster(name=cluster_name)
+            cluster = response['cluster']
+            
+            return {
+                'name': cluster['name'],
+                'status': cluster['status'],
+                'endpoint': cluster.get('endpoint', 'Not available'),
+                'version': cluster['version'],
+                'platform_version': cluster['platformVersion'],
+                'created_at': cluster['createdAt'],
+                'arn': cluster['arn']
+            }
+            
+        except ClientError as e:
+            raise Exception(f"Failed to get cluster status: {e}")
+    
+    def wait_for_cluster_active(self, cluster_name: str, timeout: int = 1800) -> bool:
+        """Wait for EKS cluster to become active"""
+        import time
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                status = self.get_cluster_status(cluster_name)
+                if status['status'] == 'ACTIVE':
+                    return True
+                elif status['status'] == 'FAILED':
+                    raise Exception(f"Cluster creation failed")
+                
+                time.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                raise Exception(f"Error waiting for cluster: {e}")
+        
+        return False
 
 class K8sClient:
     def __init__(self, namespace="default"):
@@ -20,8 +223,26 @@ class K8sClient:
     # ======================
     def create_deployment(self, name: str, image: str, replicas: int = 1, 
                          container_port: int = 80, env_vars: Optional[Dict[str, str]] = None,
-                         labels: Optional[Dict[str, str]] = None) -> Optional[Any]:
-        """Create a Kubernetes deployment"""
+                         labels: Optional[Dict[str, str]] = None, 
+                         init_containers: Optional[List[Dict]] = None,
+                         volume_mounts: Optional[List[Dict]] = None,
+                         volumes: Optional[List[Dict]] = None) -> Optional[Any]:
+        """Create a Kubernetes deployment
+        
+        Args:
+            name: Deployment name
+            image: Container image
+            replicas: Number of replicas
+            container_port: Container port
+            env_vars: Environment variables
+            labels: Labels for the deployment
+            init_containers: List of init container specifications
+            volume_mounts: List of volume mounts for the main container
+            volumes: List of volumes for the pod
+            
+        Returns:
+            Deployment object if successful, None otherwise
+        """
         if labels is None:
             labels = {"app": name}
         
@@ -30,16 +251,90 @@ class K8sClient:
         if env_vars:
             env = [client.V1EnvVar(name=k, value=v) for k, v in env_vars.items()]
         
+        # Volume mounts for main container
+        volume_mounts_obj = []
+        if volume_mounts:
+            for vm in volume_mounts:
+                volume_mounts_obj.append(client.V1VolumeMount(
+                    name=vm.get('name'),
+                    mount_path=vm.get('mount_path'),
+                    read_only=vm.get('read_only', False)
+                ))
+        
+        # Main container
         container = client.V1Container(
             name=name,
             image=image,
             ports=[client.V1ContainerPort(container_port=container_port)],
-            env=env if env else None
+            env=env if env else None,
+            volume_mounts=volume_mounts_obj if volume_mounts_obj else None
         )
+
+        # Init containers
+        init_containers_obj = []
+        if init_containers:
+            for init_container in init_containers:
+                init_env = []
+                if init_container.get('env_vars'):
+                    init_env = [client.V1EnvVar(name=k, value=v) 
+                              for k, v in init_container['env_vars'].items()]
+                
+                init_volume_mounts = []
+                if init_container.get('volume_mounts'):
+                    for vm in init_container['volume_mounts']:
+                        init_volume_mounts.append(client.V1VolumeMount(
+                            name=vm.get('name'),
+                            mount_path=vm.get('mount_path'),
+                            read_only=vm.get('read_only', False)
+                        ))
+                
+                init_containers_obj.append(client.V1Container(
+                    name=init_container['name'],
+                    image=init_container['image'],
+                    command=init_container.get('command'),
+                    args=init_container.get('args'),
+                    env=init_env if init_env else None,
+                    volume_mounts=init_volume_mounts if init_volume_mounts else None
+                ))
+        
+        # Volumes
+        volumes_obj = []
+        if volumes:
+            for volume in volumes:
+                if volume.get('type') == 'pvc':
+                    volumes_obj.append(client.V1Volume(
+                        name=volume['name'],
+                        persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=volume['claim_name']
+                        )
+                    ))
+                elif volume.get('type') == 'secret':
+                    volumes_obj.append(client.V1Volume(
+                        name=volume['name'],
+                        secret=client.V1SecretVolumeSource(
+                            secret_name=volume['secret_name']
+                        )
+                    ))
+                elif volume.get('type') == 'configmap':
+                    volumes_obj.append(client.V1Volume(
+                        name=volume['name'],
+                        config_map=client.V1ConfigMapVolumeSource(
+                            name=volume['config_map_name']
+                        )
+                    ))
+                elif volume.get('type') == 'empty_dir':
+                    volumes_obj.append(client.V1Volume(
+                        name=volume['name'],
+                        empty_dir=client.V1EmptyDirVolumeSource()
+                    ))
 
         template = client.V1PodTemplateSpec(
             metadata=client.V1ObjectMeta(labels=labels),
-            spec=client.V1PodSpec(containers=[container])
+            spec=client.V1PodSpec(
+                containers=[container],
+                init_containers=init_containers_obj if init_containers_obj else None,
+                volumes=volumes_obj if volumes_obj else None
+            )
         )
 
         spec = client.V1DeploymentSpec(
@@ -466,6 +761,299 @@ class K8sClient:
             }
         except ApiException as e:
             print(f"❌ Error describing service '{name}': {e}")
+            return None
+
+    # ======================
+    # SECRET OPERATIONS
+    # ======================
+    def create_secret(self, name: str, data: Dict[str, str], 
+                     secret_type: str = "Opaque", namespace: str = None) -> Optional[Any]:
+        """Create a Kubernetes secret
+        
+        Args:
+            name: Name of the secret
+            data: Dictionary of key-value pairs for the secret
+            secret_type: Type of secret (Opaque, kubernetes.io/tls, etc.)
+            namespace: Namespace (uses default if not provided)
+            
+        Returns:
+            Secret object if successful, None otherwise
+        """
+        try:
+            ns = namespace or self.namespace
+            
+            # Encode data as base64
+            encoded_data = {}
+            for key, value in data.items():
+                encoded_data[key] = base64.b64encode(value.encode()).decode()
+            
+            secret = client.V1Secret(
+                metadata=client.V1ObjectMeta(name=name, namespace=ns),
+                type=secret_type,
+                data=encoded_data
+            )
+            
+            result = self.core_v1.create_namespaced_secret(
+                namespace=ns,
+                body=secret
+            )
+            
+            return result
+            
+        except ApiException as e:
+            print(f"❌ Error creating secret: {e}")
+            return None
+    
+    def get_secret(self, name: str, namespace: str = None) -> Optional[Dict]:
+        """Get a Kubernetes secret
+        
+        Args:
+            name: Name of the secret
+            namespace: Namespace (uses default if not provided)
+            
+        Returns:
+            Dictionary containing secret data
+        """
+        try:
+            ns = namespace or self.namespace
+            result = self.core_v1.read_namespaced_secret(name=name, namespace=ns)
+            
+            # Decode base64 data
+            decoded_data = {}
+            if result.data:
+                for key, value in result.data.items():
+                    decoded_data[key] = base64.b64decode(value).decode()
+            
+            return {
+                'name': result.metadata.name,
+                'namespace': result.metadata.namespace,
+                'type': result.type,
+                'data': decoded_data,
+                'created_at': result.metadata.creation_timestamp
+            }
+            
+        except ApiException as e:
+            print(f"❌ Error getting secret: {e}")
+            return None
+    
+    def delete_secret(self, name: str, namespace: str = None) -> bool:
+        """Delete a Kubernetes secret"""
+        try:
+            ns = namespace or self.namespace
+            self.core_v1.delete_namespaced_secret(name=name, namespace=ns)
+            return True
+        except ApiException as e:
+            print(f"❌ Error deleting secret: {e}")
+            return False
+    
+    def list_secrets(self, namespace: str = None) -> List[Dict]:
+        """List all secrets in a namespace"""
+        try:
+            ns = namespace or self.namespace
+            result = self.core_v1.list_namespaced_secret(namespace=ns)
+            
+            secrets = []
+            for secret in result.items:
+                secrets.append({
+                    'name': secret.metadata.name,
+                    'namespace': secret.metadata.namespace,
+                    'type': secret.type,
+                    'data_keys': list(secret.data.keys()) if secret.data else [],
+                    'created_at': secret.metadata.creation_timestamp
+                })
+            
+            return secrets
+            
+        except ApiException as e:
+            print(f"❌ Error listing secrets: {e}")
+            return []
+
+    # ======================
+    # PVC OPERATIONS
+    # ======================
+    def create_pvc(self, name: str, size: str, access_modes: List[str] = None,
+                   storage_class: str = None, namespace: str = None) -> Optional[Any]:
+        """Create a Persistent Volume Claim
+        
+        Args:
+            name: Name of the PVC
+            size: Size of the volume (e.g., '10Gi', '100Mi')
+            access_modes: List of access modes (default: ['ReadWriteOnce'])
+            storage_class: Storage class name
+            namespace: Namespace (uses default if not provided)
+            
+        Returns:
+            PVC object if successful, None otherwise
+        """
+        try:
+            ns = namespace or self.namespace
+            
+            if access_modes is None:
+                access_modes = ['ReadWriteOnce']
+            
+            # Create PVC specification
+            pvc_spec = client.V1PersistentVolumeClaimSpec(
+                access_modes=access_modes,
+                resources=client.V1ResourceRequirements(
+                    requests={'storage': size}
+                )
+            )
+            
+            if storage_class:
+                pvc_spec.storage_class_name = storage_class
+            
+            pvc = client.V1PersistentVolumeClaim(
+                metadata=client.V1ObjectMeta(name=name, namespace=ns),
+                spec=pvc_spec
+            )
+            
+            result = self.core_v1.create_namespaced_persistent_volume_claim(
+                namespace=ns,
+                body=pvc
+            )
+            
+            return result
+            
+        except ApiException as e:
+            print(f"❌ Error creating PVC: {e}")
+            return None
+    
+    def get_pvc(self, name: str, namespace: str = None) -> Optional[Dict]:
+        """Get a Persistent Volume Claim"""
+        try:
+            ns = namespace or self.namespace
+            result = self.core_v1.read_namespaced_persistent_volume_claim(name=name, namespace=ns)
+            
+            return {
+                'name': result.metadata.name,
+                'namespace': result.metadata.namespace,
+                'status': result.status.phase,
+                'volume_name': result.spec.volume_name,
+                'access_modes': result.spec.access_modes,
+                'storage_class': result.spec.storage_class_name,
+                'size': result.spec.resources.requests.get('storage', 'Unknown'),
+                'created_at': result.metadata.creation_timestamp
+            }
+            
+        except ApiException as e:
+            print(f"❌ Error getting PVC: {e}")
+            return None
+    
+    def delete_pvc(self, name: str, namespace: str = None) -> bool:
+        """Delete a Persistent Volume Claim"""
+        try:
+            ns = namespace or self.namespace
+            self.core_v1.delete_namespaced_persistent_volume_claim(name=name, namespace=ns)
+            return True
+        except ApiException as e:
+            print(f"❌ Error deleting PVC: {e}")
+            return False
+    
+    def list_pvcs(self, namespace: str = None) -> List[Dict]:
+        """List all PVCs in a namespace"""
+        try:
+            ns = namespace or self.namespace
+            result = self.core_v1.list_namespaced_persistent_volume_claim(namespace=ns)
+            
+            pvcs = []
+            for pvc in result.items:
+                pvcs.append({
+                    'name': pvc.metadata.name,
+                    'namespace': pvc.metadata.namespace,
+                    'status': pvc.status.phase,
+                    'volume_name': pvc.spec.volume_name,
+                    'access_modes': pvc.spec.access_modes,
+                    'storage_class': pvc.spec.storage_class_name,
+                    'size': pvc.spec.resources.requests.get('storage', 'Unknown'),
+                    'created_at': pvc.metadata.creation_timestamp
+                })
+            
+            return pvcs
+            
+        except ApiException as e:
+            print(f"❌ Error listing PVCs: {e}")
+            return []
+
+    # ======================
+    # SERVICE URL OPERATIONS
+    # ======================
+    def get_service_url(self, name: str, namespace: str = None) -> Optional[Dict]:
+        """Get service URL, including AWS ELB URLs for LoadBalancer services
+        
+        Args:
+            name: Name of the service
+            namespace: Namespace (uses default if not provided)
+            
+        Returns:
+            Dictionary containing service URL information
+        """
+        try:
+            ns = namespace or self.namespace
+            service = self.core_v1.read_namespaced_service(name=name, namespace=ns)
+            
+            service_type = service.spec.type
+            ports = []
+            for port in service.spec.ports:
+                ports.append({
+                    'port': port.port,
+                    'target_port': port.target_port,
+                    'protocol': port.protocol,
+                    'name': port.name
+                })
+            
+            result = {
+                'name': name,
+                'namespace': ns,
+                'type': service_type,
+                'ports': ports,
+                'cluster_ip': service.spec.cluster_ip
+            }
+            
+            if service_type == 'LoadBalancer':
+                # Check for AWS ELB
+                ingress = service.status.load_balancer.ingress
+                if ingress:
+                    for ing in ingress:
+                        if ing.hostname:  # AWS ELB uses hostname
+                            result['external_url'] = f"http://{ing.hostname}"
+                            result['external_hostname'] = ing.hostname
+                            
+                            # Check if it's an AWS ELB
+                            if 'elb.amazonaws.com' in ing.hostname:
+                                result['aws_elb'] = True
+                                result['elb_dns_name'] = ing.hostname
+                        elif ing.ip:  # Some cloud providers use IP
+                            result['external_url'] = f"http://{ing.ip}"
+                            result['external_ip'] = ing.ip
+                
+                # If no ingress yet, service might still be provisioning
+                if not ingress:
+                    result['status'] = 'Provisioning LoadBalancer...'
+            
+            elif service_type == 'NodePort':
+                # For NodePort, we need to get node IPs
+                nodes = self.core_v1.list_node()
+                if nodes.items:
+                    node_ip = None
+                    for node in nodes.items:
+                        for address in node.status.addresses:
+                            if address.type == 'ExternalIP':
+                                node_ip = address.address
+                                break
+                        if node_ip:
+                            break
+                    
+                    if node_ip:
+                        for port in service.spec.ports:
+                            if port.node_port:
+                                result['external_url'] = f"http://{node_ip}:{port.node_port}"
+                                result['node_ip'] = node_ip
+                                result['node_port'] = port.node_port
+            
+            return result
+            
+        except ApiException as e:
+            print(f"❌ Error getting service URL: {e}")
             return None
 
     # ======================

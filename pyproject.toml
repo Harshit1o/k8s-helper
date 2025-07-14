@@ -12,7 +12,9 @@ dependencies = [
   "kubernetes>=26.1.0",
   "typer>=0.9.0",         # CLI support
   "rich>=13.0.0",         # Pretty terminal output
-  "pyyaml>=6.0"           # YAML handling
+  "pyyaml>=6.0",          # YAML handling
+  "boto3>=1.26.0",        # AWS SDK
+  "botocore>=1.29.0"      # AWS core
 ]
 
 [project.optional-dependencies]

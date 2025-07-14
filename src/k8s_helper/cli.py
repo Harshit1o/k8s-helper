@@ -8,6 +8,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
+import time
+import time
 
 from .core import K8sClient
 from .config import get_config
@@ -21,7 +23,8 @@ from .utils import (
     validate_name,
     validate_image,
     parse_env_vars,
-    parse_labels
+    parse_labels,
+    format_age
 )
 from . import __version__
 
@@ -451,10 +454,15 @@ def apply(
     service_type: str = typer.Option("ClusterIP", help="Service type"),
     env: Optional[str] = typer.Option(None, "--env", "-e", help="Environment variables"),
     labels: Optional[str] = typer.Option(None, "--labels", "-l", help="Labels"),
+    init_container: Optional[str] = typer.Option(None, "--init-container", help="Init container (name:image:command)"),
+    init_env: Optional[str] = typer.Option(None, "--init-env", help="Init container environment variables"),
+    pvc: Optional[str] = typer.Option(None, "--pvc", help="PVC to mount (name:mount_path)"),
+    secret: Optional[str] = typer.Option(None, "--secret", help="Secret to mount (name:mount_path)"),
     namespace: Optional[str] = namespace_option,
-    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for deployment to be ready")
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for deployment to be ready"),
+    show_url: bool = typer.Option(True, "--show-url/--no-show-url", help="Show service URL after deployment")
 ):
-    """Deploy an application (deployment + service)"""
+    """Deploy an application (deployment + service) with advanced features"""
     if not validate_name(name):
         console.print(f"❌ Invalid application name: {name}")
         return
@@ -471,6 +479,80 @@ def apply(
     
     console.print(f"🚀 Deploying application: {name}")
     
+    # Prepare init containers
+    init_containers = []
+    if init_container:
+        try:
+            parts = init_container.split(":")
+            if len(parts) >= 2:
+                init_name, init_image = parts[0], parts[1]
+                init_command = parts[2].split(" ") if len(parts) > 2 else None
+                
+                init_env_vars = parse_env_vars(init_env) if init_env else None
+                
+                init_containers.append({
+                    'name': init_name,
+                    'image': init_image,
+                    'command': init_command,
+                    'env_vars': init_env_vars
+                })
+                
+                console.print(f"🔧 Init container: {init_name} ({init_image})")
+            else:
+                console.print(f"❌ Invalid init container format: {init_container}")
+                return
+        except Exception as e:
+            console.print(f"❌ Error parsing init container: {e}")
+            return
+    
+    # Prepare volumes and volume mounts
+    volumes = []
+    volume_mounts = []
+    
+    if pvc:
+        try:
+            pvc_parts = pvc.split(":")
+            if len(pvc_parts) == 2:
+                pvc_name, mount_path = pvc_parts
+                volumes.append({
+                    'name': f"{pvc_name}-volume",
+                    'type': 'pvc',
+                    'claim_name': pvc_name
+                })
+                volume_mounts.append({
+                    'name': f"{pvc_name}-volume",
+                    'mount_path': mount_path
+                })
+                console.print(f"💾 PVC mount: {pvc_name} → {mount_path}")
+            else:
+                console.print(f"❌ Invalid PVC format: {pvc}")
+                return
+        except Exception as e:
+            console.print(f"❌ Error parsing PVC: {e}")
+            return
+    
+    if secret:
+        try:
+            secret_parts = secret.split(":")
+            if len(secret_parts) == 2:
+                secret_name, mount_path = secret_parts
+                volumes.append({
+                    'name': f"{secret_name}-volume",
+                    'type': 'secret',
+                    'secret_name': secret_name
+                })
+                volume_mounts.append({
+                    'name': f"{secret_name}-volume",
+                    'mount_path': mount_path
+                })
+                console.print(f"🔐 Secret mount: {secret_name} → {mount_path}")
+            else:
+                console.print(f"❌ Invalid secret format: {secret}")
+                return
+        except Exception as e:
+            console.print(f"❌ Error parsing secret: {e}")
+            return
+    
     # Create deployment
     with console.status(f"Creating deployment {name}..."):
         deployment_result = client.create_deployment(
@@ -479,7 +561,10 @@ def apply(
             replicas=replicas,
             container_port=port,
             env_vars=env_vars,
-            labels=label_dict
+            labels=label_dict,
+            init_containers=init_containers if init_containers else None,
+            volume_mounts=volume_mounts if volume_mounts else None,
+            volumes=volumes if volumes else None
         )
     
     if not deployment_result:
@@ -508,6 +593,36 @@ def apply(
                 console.print(f"✅ Application {name} is ready")
             else:
                 console.print(f"❌ Application {name} failed to become ready")
+    
+    # Show service URL if requested
+    if show_url:
+        console.print(f"\n🔗 Service URL Information:")
+        
+        # Wait a moment for service to be ready
+        time.sleep(2)
+        
+        url_info = client.get_service_url(f"{name}-service", ns)
+        if url_info:
+            console.print(f"🔧 Service Type: {url_info['type']}")
+            console.print(f"🖥️  Cluster IP: {url_info['cluster_ip']}")
+            
+            if url_info['type'] == 'LoadBalancer':
+                if url_info.get('aws_elb'):
+                    console.print(f"🌐 AWS ELB DNS: [green]{url_info['elb_dns_name']}[/green]")
+                    console.print(f"🔗 External URL: [blue]{url_info['external_url']}[/blue]")
+                elif url_info.get('external_url'):
+                    console.print(f"🔗 External URL: [blue]{url_info['external_url']}[/blue]")
+                else:
+                    console.print(f"⏳ LoadBalancer provisioning... Use 'k8s-helper service-url {name}-service' to check status")
+            
+            elif url_info['type'] == 'NodePort':
+                if url_info.get('external_url'):
+                    console.print(f"🔗 NodePort URL: [blue]{url_info['external_url']}[/blue]")
+            
+            elif url_info['type'] == 'ClusterIP':
+                console.print(f"💡 ClusterIP service - accessible within cluster at {url_info['cluster_ip']}:{port}")
+        else:
+            console.print("❌ Could not retrieve service URL information")
 
 
 @app.command()
@@ -536,5 +651,327 @@ def cleanup(
             console.print(f"⚠️  Partial cleanup completed for application {name}")
 
 
-if __name__ == "__main__":
-    app()
+# ======================
+# EKS COMMANDS
+# ======================
+@app.command()
+def create_eks_cluster(
+    name: str = typer.Argument(..., help="Cluster name"),
+    region: str = typer.Option("us-west-2", "--region", "-r", help="AWS region"),
+    version: str = typer.Option("1.29", "--version", "-v", help="Kubernetes version"),
+    node_group: str = typer.Option(None, "--node-group", help="Node group name"),
+    instance_types: str = typer.Option("t3.medium", "--instance-types", help="EC2 instance types (comma-separated)"),
+    min_size: int = typer.Option(1, "--min-size", help="Minimum number of nodes"),
+    max_size: int = typer.Option(3, "--max-size", help="Maximum number of nodes"),
+    desired_size: int = typer.Option(2, "--desired-size", help="Desired number of nodes"),
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for cluster to be ready")
+):
+    """Create an AWS EKS cluster"""
+    if not validate_name(name):
+        console.print(f"❌ Invalid cluster name: {name}")
+        return
+    
+    try:
+        from .core import EKSClient
+        
+        eks_client = EKSClient(region=region)
+        
+        # Parse instance types
+        instance_type_list = [t.strip() for t in instance_types.split(",")]
+        
+        scaling_config = {
+            "minSize": min_size,
+            "maxSize": max_size,
+            "desiredSize": desired_size
+        }
+        
+        console.print(f"🚀 Creating EKS cluster: {name}")
+        console.print(f"📍 Region: {region}")
+        console.print(f"🎯 Version: {version}")
+        console.print(f"💻 Instance types: {instance_type_list}")
+        console.print(f"📊 Scaling: {min_size}-{max_size} nodes (desired: {desired_size})")
+        
+        with console.status("Creating EKS cluster..."):
+            cluster_info = eks_client.create_cluster(
+                cluster_name=name,
+                version=version,
+                node_group_name=node_group,
+                instance_types=instance_type_list,
+                scaling_config=scaling_config
+            )
+        
+        console.print(f"✅ EKS cluster creation initiated")
+        console.print(f"📋 Cluster ARN: {cluster_info['cluster_arn']}")
+        console.print(f"🕐 Created at: {cluster_info['created_at']}")
+        
+        if wait:
+            console.print("⏳ Waiting for cluster to become active...")
+            with console.status("Waiting for cluster to be ready..."):
+                if eks_client.wait_for_cluster_active(name):
+                    console.print("✅ EKS cluster is now active!")
+                    
+                    # Show cluster status
+                    status = eks_client.get_cluster_status(name)
+                    console.print(f"🔗 Endpoint: {status['endpoint']}")
+                else:
+                    console.print("❌ Timeout waiting for cluster to become active")
+        else:
+            console.print("💡 Use 'aws eks update-kubeconfig --name {name} --region {region}' to configure kubectl")
+    
+    except Exception as e:
+        console.print(f"❌ Failed to create EKS cluster: {e}")
+
+
+# ======================
+# SECRET COMMANDS
+# ======================
+@app.command()
+def create_secret(
+    name: str = typer.Argument(..., help="Secret name"),
+    data: str = typer.Option(..., "--data", "-d", help="Secret data (key1=value1,key2=value2)"),
+    secret_type: str = typer.Option("Opaque", "--type", "-t", help="Secret type"),
+    namespace: Optional[str] = namespace_option
+):
+    """Create a Kubernetes secret"""
+    if not validate_name(name):
+        console.print(f"❌ Invalid secret name: {name}")
+        return
+    
+    # Parse data
+    try:
+        data_dict = {}
+        for pair in data.split(","):
+            if "=" in pair:
+                key, value = pair.split("=", 1)
+                data_dict[key.strip()] = value.strip()
+            else:
+                console.print(f"❌ Invalid data format: {pair}")
+                return
+        
+        if not data_dict:
+            console.print("❌ No valid data provided")
+            return
+        
+        ns = namespace or get_config().get_namespace()
+        client = K8sClient(namespace=ns)
+        
+        with console.status(f"Creating secret {name}..."):
+            result = client.create_secret(name, data_dict, secret_type, ns)
+        
+        if result:
+            console.print(f"✅ Secret {name} created successfully")
+            console.print(f"📋 Type: {secret_type}")
+            console.print(f"🔑 Keys: {list(data_dict.keys())}")
+        else:
+            console.print(f"❌ Failed to create secret {name}")
+    
+    except Exception as e:
+        console.print(f"❌ Error creating secret: {e}")
+
+
+@app.command()
+def list_secrets(
+    namespace: Optional[str] = namespace_option,
+    output: str = output_option
+):
+    """List secrets"""
+    ns = namespace or get_config().get_namespace()
+    client = K8sClient(namespace=ns)
+    
+    secrets = client.list_secrets(ns)
+    
+    if output == "table":
+        table = Table(title=f"Secrets in {ns}")
+        table.add_column("Name", style="cyan")
+        table.add_column("Type", style="magenta")
+        table.add_column("Keys", style="green")
+        table.add_column("Age", style="blue")
+        
+        for secret in secrets:
+            age = format_age(secret['created_at'])
+            keys = ", ".join(secret['data_keys'])
+            table.add_row(secret['name'], secret['type'], keys, age)
+        
+        console.print(table)
+    elif output == "yaml":
+        console.print(format_yaml_output(secrets))
+    elif output == "json":
+        console.print(format_json_output(secrets))
+
+
+@app.command()
+def delete_secret(
+    name: str = typer.Argument(..., help="Secret name"),
+    namespace: Optional[str] = namespace_option
+):
+    """Delete a secret"""
+    ns = namespace or get_config().get_namespace()
+    client = K8sClient(namespace=ns)
+    
+    if typer.confirm(f"Are you sure you want to delete secret {name}?"):
+        with console.status(f"Deleting secret {name}..."):
+            if client.delete_secret(name, ns):
+                console.print(f"✅ Secret {name} deleted successfully")
+            else:
+                console.print(f"❌ Failed to delete secret {name}")
+
+
+# ======================
+# PVC COMMANDS
+# ======================
+@app.command()
+def create_pvc(
+    name: str = typer.Argument(..., help="PVC name"),
+    size: str = typer.Argument(..., help="Storage size (e.g., 10Gi, 100Mi)"),
+    access_modes: str = typer.Option("ReadWriteOnce", "--access-modes", "-a", help="Access modes (comma-separated)"),
+    storage_class: Optional[str] = typer.Option(None, "--storage-class", "-s", help="Storage class"),
+    namespace: Optional[str] = namespace_option
+):
+    """Create a Persistent Volume Claim"""
+    if not validate_name(name):
+        console.print(f"❌ Invalid PVC name: {name}")
+        return
+    
+    # Parse access modes
+    access_modes_list = [mode.strip() for mode in access_modes.split(",")]
+    
+    ns = namespace or get_config().get_namespace()
+    client = K8sClient(namespace=ns)
+    
+    with console.status(f"Creating PVC {name}..."):
+        result = client.create_pvc(
+            name=name,
+            size=size,
+            access_modes=access_modes_list,
+            storage_class=storage_class,
+            namespace=ns
+        )
+    
+    if result:
+        console.print(f"✅ PVC {name} created successfully")
+        console.print(f"💾 Size: {size}")
+        console.print(f"🔐 Access modes: {access_modes_list}")
+        if storage_class:
+            console.print(f"📦 Storage class: {storage_class}")
+    else:
+        console.print(f"❌ Failed to create PVC {name}")
+
+
+@app.command()
+def list_pvcs(
+    namespace: Optional[str] = namespace_option,
+    output: str = output_option
+):
+    """List Persistent Volume Claims"""
+    ns = namespace or get_config().get_namespace()
+    client = K8sClient(namespace=ns)
+    
+    pvcs = client.list_pvcs(ns)
+    
+    if output == "table":
+        table = Table(title=f"PVCs in {ns}")
+        table.add_column("Name", style="cyan")
+        table.add_column("Status", style="magenta")
+        table.add_column("Volume", style="green")
+        table.add_column("Size", style="blue")
+        table.add_column("Access Modes", style="yellow")
+        table.add_column("Storage Class", style="red")
+        table.add_column("Age", style="blue")
+        
+        for pvc in pvcs:
+            age = format_age(pvc['created_at'])
+            status_color = "green" if pvc['status'] == 'Bound' else "yellow"
+            table.add_row(
+                pvc['name'],
+                f"[{status_color}]{pvc['status']}[/{status_color}]",
+                pvc['volume_name'] or "N/A",
+                pvc['size'],
+                ", ".join(pvc['access_modes']),
+                pvc['storage_class'] or "N/A",
+                age
+            )
+        
+        console.print(table)
+    elif output == "yaml":
+        console.print(format_yaml_output(pvcs))
+    elif output == "json":
+        console.print(format_json_output(pvcs))
+
+
+@app.command()
+def delete_pvc(
+    name: str = typer.Argument(..., help="PVC name"),
+    namespace: Optional[str] = namespace_option
+):
+    """Delete a Persistent Volume Claim"""
+    ns = namespace or get_config().get_namespace()
+    client = K8sClient(namespace=ns)
+    
+    if typer.confirm(f"Are you sure you want to delete PVC {name}?"):
+        with console.status(f"Deleting PVC {name}..."):
+            if client.delete_pvc(name, ns):
+                console.print(f"✅ PVC {name} deleted successfully")
+            else:
+                console.print(f"❌ Failed to delete PVC {name}")
+
+
+# ======================
+# SERVICE URL COMMAND
+# ======================
+@app.command()
+def service_url(
+    name: str = typer.Argument(..., help="Service name"),
+    namespace: Optional[str] = namespace_option,
+    watch: bool = typer.Option(False, "--watch", "-w", help="Watch for URL changes")
+):
+    """Get service URL including AWS ELB URLs"""
+    ns = namespace or get_config().get_namespace()
+    client = K8sClient(namespace=ns)
+    
+    def show_service_url():
+        url_info = client.get_service_url(name, ns)
+        if not url_info:
+            console.print(f"❌ Service {name} not found")
+            return False
+        
+        console.print(f"\n🔗 Service URL Information for [cyan]{name}[/cyan]")
+        console.print(f"📍 Namespace: {url_info['namespace']}")
+        console.print(f"🔧 Type: {url_info['type']}")
+        console.print(f"🖥️  Cluster IP: {url_info['cluster_ip']}")
+        
+        # Show ports
+        console.print("\n📋 Ports:")
+        for port in url_info['ports']:
+            console.print(f"  • {port['port']}/{port['protocol']} → {port['target_port']}")
+        
+        # Show external access
+        if url_info['type'] == 'LoadBalancer':
+            if url_info.get('aws_elb'):
+                console.print(f"\n🌐 AWS ELB DNS: [green]{url_info['elb_dns_name']}[/green]")
+                console.print(f"🔗 External URL: [blue]{url_info['external_url']}[/blue]")
+            elif url_info.get('external_url'):
+                console.print(f"\n🔗 External URL: [blue]{url_info['external_url']}[/blue]")
+            elif url_info.get('status'):
+                console.print(f"\n⏳ Status: {url_info['status']}")
+        
+        elif url_info['type'] == 'NodePort':
+            if url_info.get('external_url'):
+                console.print(f"\n🔗 NodePort URL: [blue]{url_info['external_url']}[/blue]")
+                console.print(f"🖥️  Node IP: {url_info['node_ip']}")
+                console.print(f"🚪 Node Port: {url_info['node_port']}")
+        
+        elif url_info['type'] == 'ClusterIP':
+            console.print(f"\n💡 ClusterIP service - only accessible within cluster")
+        
+        return True
+    
+    if watch:
+        console.print("👁️  Watching for service URL changes (Ctrl+C to stop)")
+        try:
+            while True:
+                show_service_url()
+                time.sleep(5)
+        except KeyboardInterrupt:
+            console.print("\n👋 Stopped watching")
+    else:
+        show_service_url()
