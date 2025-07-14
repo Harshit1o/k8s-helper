@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-01-15
+
+### Added
+- **AWS EKS Integration**
+  - `create-eks-cluster` command for creating EKS clusters
+  - Automatic IAM role creation for EKS
+  - Support for custom node groups and scaling configurations
+  - Integration with AWS boto3 SDK
+
+- **Secrets Management**
+  - `create-secret` command for creating Kubernetes secrets
+  - `list-secrets` command for listing secrets
+  - `delete-secret` command for deleting secrets
+  - Support for different secret types (Opaque, TLS, etc.)
+  - Base64 encoding/decoding handling
+
+- **Persistent Volume Claims (PVC)**
+  - `create-pvc` command for creating PVCs
+  - `list-pvcs` command for listing PVCs
+  - `delete-pvc` command for deleting PVCs
+  - Support for different access modes and storage classes
+
+- **Service URL Retrieval**
+  - `service-url` command for getting service URLs
+  - AWS ELB DNS name detection
+  - Support for ClusterIP, NodePort, and LoadBalancer services
+  - Watch mode for monitoring URL changes
+
+- **Enhanced Application Deployment**
+  - Init container support in `apply` command
+  - Volume mounts for PVCs and secrets
+  - Automatic service URL display after deployment
+  - Support for complex deployment scenarios
+
+- **CLI Improvements**
+  - `--version` option to show installed version
+  - Rich help output for all commands
+  - Comprehensive error handling and validation
+
+### Fixed
+- Version consistency between `__init__.py` and `pyproject.toml`
+- Enhanced error messages and status reporting
+
+### Dependencies
+- Added `boto3>=1.26.0` for AWS integration
+- Added `botocore>=1.29.0` for AWS core functionality
+
 ## [Unreleased]
 
 ### Added
