@@ -30,7 +30,8 @@ class EKSClient:
                       subnets: List[str] = None, security_groups: List[str] = None,
                       role_arn: str = None, node_group_name: str = None,
                       instance_types: List[str] = None, ami_type: str = "AL2_x86_64",
-                      capacity_type: str = "ON_DEMAND", scaling_config: Dict = None) -> Dict:
+                      capacity_type: str = "ON_DEMAND", scaling_config: Dict = None,
+                      create_nodegroup: bool = True, wait_for_cluster: bool = False) -> Dict:
         """Create an EKS cluster
         
         Args:
@@ -44,6 +45,8 @@ class EKSClient:
             ami_type: AMI type for nodes
             capacity_type: Capacity type (ON_DEMAND or SPOT)
             scaling_config: Scaling configuration for node group
+            create_nodegroup: Whether to create a node group automatically
+            wait_for_cluster: Whether to wait for cluster to be active before returning
             
         Returns:
             Dict containing cluster information
@@ -74,12 +77,16 @@ class EKSClient:
                 resourcesVpcConfig={
                     'subnetIds': subnets,
                     'securityGroupIds': security_groups or [],
-                    'endpointConfigPublic': True,
-                    'endpointConfigPrivate': True
+                    'endpointPublicAccess': True,
+                    'endpointPrivateAccess': True
                 },
                 logging={
-                    'enable': True,
-                    'types': ['api', 'audit', 'authenticator', 'controllerManager', 'scheduler']
+                    'clusterLogging': [
+                        {
+                            'types': ['api', 'audit', 'authenticator', 'controllerManager', 'scheduler'],
+                            'enabled': True
+                        }
+                    ]
                 }
             )
             
@@ -94,11 +101,34 @@ class EKSClient:
                 'created_at': cluster_response['cluster']['createdAt']
             }
             
-            # If node group name is provided, we'll create it after cluster is active
-            if node_group_name:
+            # Create node group if requested
+            if create_nodegroup:
+                if node_group_name is None:
+                    node_group_name = f"{cluster_name}-nodegroup"
+                
                 cluster_info['node_group_name'] = node_group_name
                 cluster_info['instance_types'] = instance_types
                 cluster_info['scaling_config'] = scaling_config
+                cluster_info['create_nodegroup'] = True
+                
+                # If wait_for_cluster is True, create the node group after cluster is active
+                if wait_for_cluster:
+                    if self.wait_for_cluster_active(cluster_name):
+                        try:
+                            nodegroup_info = self.create_nodegroup(
+                                cluster_name=cluster_name,
+                                nodegroup_name=node_group_name,
+                                instance_types=instance_types,
+                                ami_type=ami_type,
+                                capacity_type=capacity_type,
+                                scaling_config=scaling_config,
+                                subnets=subnets
+                            )
+                            cluster_info['nodegroup_info'] = nodegroup_info
+                        except Exception as e:
+                            cluster_info['nodegroup_error'] = str(e)
+                    else:
+                        cluster_info['nodegroup_error'] = "Cluster creation timed out"
             
             return cluster_info
             
@@ -106,21 +136,109 @@ class EKSClient:
             raise Exception(f"Failed to create EKS cluster: {e}")
     
     def _get_default_subnets(self) -> List[str]:
-        """Get default subnets for EKS cluster"""
+        """Get default subnets for EKS cluster from different AZs"""
         try:
             response = self.ec2_client.describe_subnets()
-            subnets = []
+            
+            # Group subnets by availability zone
+            subnets_by_az = {}
             for subnet in response['Subnets']:
                 if subnet['State'] == 'available':
-                    subnets.append(subnet['SubnetId'])
+                    az = subnet['AvailabilityZone']
+                    if az not in subnets_by_az:
+                        subnets_by_az[az] = []
+                    subnets_by_az[az].append(subnet['SubnetId'])
             
-            if len(subnets) < 2:
-                raise Exception("Need at least 2 subnets for EKS cluster")
+            # Get at least 2 subnets from different AZs
+            selected_subnets = []
+            for az, subnet_ids in subnets_by_az.items():
+                if len(selected_subnets) < 2:
+                    selected_subnets.append(subnet_ids[0])  # Take first subnet from each AZ
             
-            return subnets[:2]  # Return first 2 available subnets
+            if len(selected_subnets) < 2:
+                # If we don't have subnets in 2 different AZs, let's create them
+                selected_subnets = self._create_default_vpc_subnets()
+            
+            return selected_subnets
             
         except ClientError as e:
             raise Exception(f"Failed to get default subnets: {e}")
+    
+    def _create_default_vpc_subnets(self) -> List[str]:
+        """Create default VPC and subnets for EKS if none exist"""
+        try:
+            # Get default VPC
+            vpcs = self.ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
+            if not vpcs['Vpcs']:
+                raise Exception("No default VPC found. Please create subnets manually or set up a VPC.")
+            
+            vpc_id = vpcs['Vpcs'][0]['VpcId']
+            
+            # Get available AZs
+            azs = self.ec2_client.describe_availability_zones()
+            if len(azs['AvailabilityZones']) < 2:
+                raise Exception("Need at least 2 availability zones for EKS cluster")
+            
+            # Create subnets in first 2 AZs
+            subnet_ids = []
+            for i, az in enumerate(azs['AvailabilityZones'][:2]):
+                cidr = f"172.31.{i * 16}.0/20"  # Create non-overlapping CIDR blocks
+                
+                try:
+                    response = self.ec2_client.create_subnet(
+                        VpcId=vpc_id,
+                        CidrBlock=cidr,
+                        AvailabilityZone=az['ZoneName']
+                    )
+                    subnet_id = response['Subnet']['SubnetId']
+                    subnet_ids.append(subnet_id)
+                    
+                    # Enable auto-assign public IP
+                    self.ec2_client.modify_subnet_attribute(
+                        SubnetId=subnet_id,
+                        MapPublicIpOnLaunch={'Value': True}
+                    )
+                    
+                    # Tag the subnet
+                    self.ec2_client.create_tags(
+                        Resources=[subnet_id],
+                        Tags=[
+                            {'Key': 'Name', 'Value': f'eks-subnet-{az["ZoneName"]}'},
+                            {'Key': 'kubernetes.io/role/elb', 'Value': '1'}
+                        ]
+                    )
+                    
+                except ClientError as e:
+                    if e.response['Error']['Code'] == 'InvalidVpc.Range':
+                        # Try a different CIDR range
+                        cidr = f"10.0.{i}.0/24"
+                        response = self.ec2_client.create_subnet(
+                            VpcId=vpc_id,
+                            CidrBlock=cidr,
+                            AvailabilityZone=az['ZoneName']
+                        )
+                        subnet_id = response['Subnet']['SubnetId']
+                        subnet_ids.append(subnet_id)
+                        
+                        # Enable auto-assign public IP
+                        self.ec2_client.modify_subnet_attribute(
+                            SubnetId=subnet_id,
+                            MapPublicIpOnLaunch={'Value': True}
+                        )
+                        
+                        # Tag the subnet
+                        self.ec2_client.create_tags(
+                            Resources=[subnet_id],
+                            Tags=[
+                                {'Key': 'Name', 'Value': f'eks-subnet-{az["ZoneName"]}'},
+                                {'Key': 'kubernetes.io/role/elb', 'Value': '1'}
+                            ]
+                        )
+            
+            return subnet_ids
+            
+        except ClientError as e:
+            raise Exception(f"Failed to create default subnets: {e}")
     
     def _create_or_get_cluster_role(self) -> str:
         """Create or get IAM role for EKS cluster"""
@@ -168,6 +286,326 @@ class EKSClient:
             else:
                 raise Exception(f"Failed to create or get cluster role: {e}")
     
+    def _create_or_get_nodegroup_role(self) -> str:
+        """Create or get IAM role for EKS node group"""
+        role_name = "eks-nodegroup-role"
+        
+        try:
+            # Check if role exists
+            response = self.iam_client.get_role(RoleName=role_name)
+            return response['Role']['Arn']
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchEntity':
+                # Create the role
+                trust_policy = {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "ec2.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                }
+                
+                response = self.iam_client.create_role(
+                    RoleName=role_name,
+                    AssumeRolePolicyDocument=json.dumps(trust_policy),
+                    Description="EKS node group role created by k8s-helper"
+                )
+                
+                # Attach required policies for node group
+                policies = [
+                    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+                    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+                    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+                ]
+                
+                for policy in policies:
+                    self.iam_client.attach_role_policy(
+                        RoleName=role_name,
+                        PolicyArn=policy
+                    )
+                
+                return response['Role']['Arn']
+            else:
+                raise Exception(f"Failed to create or get node group role: {e}")
+    
+    def create_nodegroup(self, cluster_name: str, nodegroup_name: str, 
+                        instance_types: List[str] = None, ami_type: str = "AL2_x86_64",
+                        capacity_type: str = "ON_DEMAND", scaling_config: Dict = None,
+                        subnets: List[str] = None, node_role_arn: str = None,
+                        ssh_key: str = None) -> Dict:
+        """Create an EKS managed node group
+        
+        Args:
+            cluster_name: Name of the EKS cluster
+            nodegroup_name: Name of the node group
+            instance_types: List of EC2 instance types
+            ami_type: AMI type for nodes
+            capacity_type: Capacity type (ON_DEMAND or SPOT)
+            scaling_config: Scaling configuration
+            subnets: List of subnet IDs
+            node_role_arn: IAM role ARN for nodes
+            ssh_key: EC2 SSH key name for remote access (optional)
+            
+        Returns:
+            Dict containing node group information
+        """
+        try:
+            # Use defaults if not provided
+            if instance_types is None:
+                instance_types = ["t3.medium"]
+            
+            if scaling_config is None:
+                scaling_config = {
+                    "minSize": 1,
+                    "maxSize": 3,
+                    "desiredSize": 2
+                }
+            
+            if node_role_arn is None:
+                node_role_arn = self._create_or_get_nodegroup_role()
+            
+            if subnets is None:
+                # Get cluster's subnets
+                cluster_info = self.get_cluster_status(cluster_name)
+                cluster_details = self.eks_client.describe_cluster(name=cluster_name)
+                subnets = cluster_details['cluster']['resourcesVpcConfig']['subnetIds']
+            
+            # Prepare node group creation parameters
+            nodegroup_params = {
+                'clusterName': cluster_name,
+                'nodegroupName': nodegroup_name,
+                'scalingConfig': scaling_config,
+                'instanceTypes': instance_types,
+                'amiType': ami_type,
+                'capacityType': capacity_type,
+                'nodeRole': node_role_arn,
+                'subnets': subnets
+            }
+            
+            # Only add remoteAccess if SSH key is provided
+            if ssh_key:
+                nodegroup_params['remoteAccess'] = {
+                    'ec2SshKey': ssh_key
+                }
+            
+            # Create the node group
+            response = self.eks_client.create_nodegroup(**nodegroup_params)
+            
+            return {
+                'nodegroup_name': nodegroup_name,
+                'cluster_name': cluster_name,
+                'status': 'CREATING',
+                'nodegroup_arn': response['nodegroup']['nodegroupArn'],
+                'instance_types': instance_types,
+                'ami_type': ami_type,
+                'capacity_type': capacity_type,
+                'scaling_config': scaling_config,
+                'created_at': response['nodegroup']['createdAt'],
+                'node_role_arn': node_role_arn
+            }
+            
+        except ClientError as e:
+            raise Exception(f"Failed to create node group: {e}")
+    
+    def get_nodegroup_status(self, cluster_name: str, nodegroup_name: str) -> Dict:
+        """Get EKS node group status"""
+        try:
+            response = self.eks_client.describe_nodegroup(
+                clusterName=cluster_name,
+                nodegroupName=nodegroup_name
+            )
+            nodegroup = response['nodegroup']
+            
+            return {
+                'name': nodegroup['nodegroupName'],
+                'cluster_name': cluster_name,
+                'status': nodegroup['status'],
+                'instance_types': nodegroup['instanceTypes'],
+                'ami_type': nodegroup['amiType'],
+                'capacity_type': nodegroup['capacityType'],
+                'scaling_config': nodegroup['scalingConfig'],
+                'created_at': nodegroup['createdAt'],
+                'arn': nodegroup['nodegroupArn']
+            }
+            
+        except ClientError as e:
+            raise Exception(f"Failed to get node group status: {e}")
+    
+    def wait_for_nodegroup_active(self, cluster_name: str, nodegroup_name: str, timeout: int = 1200) -> bool:
+        """Wait for EKS node group to become active"""
+        import time
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                status = self.get_nodegroup_status(cluster_name, nodegroup_name)
+                if status['status'] == 'ACTIVE':
+                    return True
+                elif status['status'] in ['CREATE_FAILED', 'DEGRADED']:
+                    raise Exception(f"Node group creation failed with status: {status['status']}")
+                
+                time.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                raise Exception(f"Error waiting for node group: {e}")
+        
+        return False
+    
+    def list_nodegroups(self, cluster_name: str) -> List[Dict]:
+        """List all node groups for a cluster"""
+        try:
+            response = self.eks_client.list_nodegroups(clusterName=cluster_name)
+            nodegroups = []
+            
+            for nodegroup_name in response['nodegroups']:
+                try:
+                    nodegroup_info = self.get_nodegroup_status(cluster_name, nodegroup_name)
+                    nodegroups.append(nodegroup_info)
+                except Exception as e:
+                    # Skip node groups that can't be described
+                    continue
+            
+            return nodegroups
+            
+        except ClientError as e:
+            raise Exception(f"Failed to list node groups: {e}")
+    
+    def create_nodegroup_with_instance_profile(self, cluster_name: str, nodegroup_name: str, 
+                                              instance_types: List[str] = None, ami_type: str = "AL2_x86_64",
+                                              capacity_type: str = "ON_DEMAND", scaling_config: Dict = None,
+                                              subnets: List[str] = None, node_role_arn: str = None,
+                                              instance_profile: str = None) -> Dict:
+        """Create an EKS managed node group with a specific instance profile
+        
+        Args:
+            cluster_name: Name of the EKS cluster
+            nodegroup_name: Name of the node group
+            instance_types: List of EC2 instance types
+            ami_type: AMI type for nodes
+            capacity_type: Capacity type (ON_DEMAND or SPOT)
+            scaling_config: Scaling configuration
+            subnets: List of subnet IDs
+            node_role_arn: IAM role ARN for nodes
+            instance_profile: EC2 instance profile name
+            
+        Returns:
+            Dict containing node group information
+        """
+        try:
+            # Use defaults if not provided
+            if instance_types is None:
+                instance_types = ["t3.medium"]
+            
+            if scaling_config is None:
+                scaling_config = {
+                    "minSize": 1,
+                    "maxSize": 3,
+                    "desiredSize": 2
+                }
+            
+            if node_role_arn is None:
+                node_role_arn = self._create_or_get_nodegroup_role()
+            
+            if subnets is None:
+                # Get cluster's subnets
+                cluster_info = self.get_cluster_status(cluster_name)
+                cluster_details = self.eks_client.describe_cluster(name=cluster_name)
+                subnets = cluster_details['cluster']['resourcesVpcConfig']['subnetIds']
+            
+            # Create the node group
+            response = self.eks_client.create_nodegroup(
+                clusterName=cluster_name,
+                nodegroupName=nodegroup_name,
+                scalingConfig=scaling_config,
+                instanceTypes=instance_types,
+                amiType=ami_type,
+                capacityType=capacity_type,
+                nodeRole=node_role_arn,
+                subnets=subnets,
+                remoteAccess={
+                    'ec2SshKey': None  # SSH key is optional
+                },
+                instanceProfile=instance_profile
+            )
+            
+            return {
+                'nodegroup_name': nodegroup_name,
+                'cluster_name': cluster_name,
+                'status': 'CREATING',
+                'nodegroup_arn': response['nodegroup']['nodegroupArn'],
+                'instance_types': instance_types,
+                'ami_type': ami_type,
+                'capacity_type': capacity_type,
+                'scaling_config': scaling_config,
+                'created_at': response['nodegroup']['createdAt'],
+                'node_role_arn': node_role_arn,
+                'instance_profile': instance_profile
+            }
+            
+        except ClientError as e:
+            raise Exception(f"Failed to create node group with instance profile: {e}")
+    
+    def update_nodegroup_scaling_config(self, cluster_name: str, nodegroup_name: str, 
+                                       scaling_config: Dict) -> bool:
+        """Update the scaling configuration of a node group"""
+        try:
+            # Get current node group configuration
+            nodegroup = self.get_nodegroup_status(cluster_name, nodegroup_name)
+            
+            # Update scaling configuration
+            response = self.eks_client.update_nodegroup_config(
+                clusterName=cluster_name,
+                nodegroupName=nodegroup_name,
+                scalingConfig=scaling_config
+            )
+            
+            print(f"✅ Node group '{nodegroup_name}' scaling configuration updated")
+            return True
+            
+        except ClientError as e:
+            print(f"❌ Error updating node group scaling configuration: {e}")
+            return False
+    
+    def update_nodegroup_instance_type(self, cluster_name: str, nodegroup_name: str, 
+                                      instance_types: List[str]) -> bool:
+        """Update the instance type of a node group"""
+        try:
+            # Get current node group configuration
+            nodegroup = self.get_nodegroup_status(cluster_name, nodegroup_name)
+            
+            # Update instance type
+            response = self.eks_client.update_nodegroup_config(
+                clusterName=cluster_name,
+                nodegroupName=nodegroup_name,
+                instanceTypes=instance_types
+            )
+            
+            print(f"✅ Node group '{nodegroup_name}' instance type updated")
+            return True
+            
+        except ClientError as e:
+            print(f"❌ Error updating node group instance type: {e}")
+            return False
+    
+    def delete_nodegroup(self, cluster_name: str, nodegroup_name: str) -> bool:
+        """Delete an EKS managed node group"""
+        try:
+            self.eks_client.delete_nodegroup(
+                clusterName=cluster_name,
+                nodegroupName=nodegroup_name
+            )
+            print(f"✅ Node group '{nodegroup_name}' deletion initiated")
+            return True
+        except ClientError as e:
+            print(f"❌ Error deleting node group '{nodegroup_name}': {e}")
+            return False
+
     def get_cluster_status(self, cluster_name: str) -> Dict:
         """Get EKS cluster status"""
         try:
@@ -179,7 +617,7 @@ class EKSClient:
                 'status': cluster['status'],
                 'endpoint': cluster.get('endpoint', 'Not available'),
                 'version': cluster['version'],
-                'platform_version': cluster['platformVersion'],
+                'platform_version': cluster.get('platformVersion', 'Not available'),
                 'created_at': cluster['createdAt'],
                 'arn': cluster['arn']
             }

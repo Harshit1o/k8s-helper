@@ -664,7 +664,10 @@ def create_eks_cluster(
     min_size: int = typer.Option(1, "--min-size", help="Minimum number of nodes"),
     max_size: int = typer.Option(3, "--max-size", help="Maximum number of nodes"),
     desired_size: int = typer.Option(2, "--desired-size", help="Desired number of nodes"),
-    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for cluster to be ready")
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for cluster to be ready"),
+    create_nodegroup: bool = typer.Option(True, "--create-nodegroup/--no-nodegroup", help="Create node group automatically"),
+    ami_type: str = typer.Option("AL2_x86_64", "--ami-type", help="AMI type for nodes"),
+    capacity_type: str = typer.Option("ON_DEMAND", "--capacity-type", help="Capacity type: ON_DEMAND or SPOT")
 ):
     """Create an AWS EKS cluster"""
     if not validate_name(name):
@@ -690,38 +693,297 @@ def create_eks_cluster(
         console.print(f"🎯 Version: {version}")
         console.print(f"💻 Instance types: {instance_type_list}")
         console.print(f"📊 Scaling: {min_size}-{max_size} nodes (desired: {desired_size})")
+        console.print(f"🛠️  AMI Type: {ami_type}")
+        console.print(f"⚡ Capacity Type: {capacity_type}")
         
-        with console.status("Creating EKS cluster..."):
+        # Show what will be created
+        console.print("\n🔧 EKS Resources to create:")
+        console.print("   • IAM roles for cluster and node groups")
+        console.print("   • VPC subnets in at least 2 availability zones")
+        console.print("   • Security groups for cluster communication")
+        console.print("   • EKS cluster control plane")
+        if create_nodegroup:
+            if node_group:
+                console.print(f"   • Managed node group: {node_group}")
+            else:
+                console.print(f"   • Managed node group: {name}-nodegroup")
+        else:
+            console.print("   • ⚠️  No node group (cluster will have no worker nodes)")
+        
+        with console.status("Creating EKS cluster and required resources..."):
             cluster_info = eks_client.create_cluster(
                 cluster_name=name,
                 version=version,
                 node_group_name=node_group,
                 instance_types=instance_type_list,
-                scaling_config=scaling_config
+                scaling_config=scaling_config,
+                ami_type=ami_type,
+                capacity_type=capacity_type,
+                create_nodegroup=create_nodegroup,
+                wait_for_cluster=wait
             )
         
         console.print(f"✅ EKS cluster creation initiated")
         console.print(f"📋 Cluster ARN: {cluster_info['cluster_arn']}")
         console.print(f"🕐 Created at: {cluster_info['created_at']}")
         
+        if 'subnets' in cluster_info:
+            console.print(f"🌐 Subnets: {cluster_info['subnets']}")
+        
+        # Show node group information
+        if create_nodegroup:
+            if 'nodegroup_info' in cluster_info:
+                nodegroup_info = cluster_info['nodegroup_info']
+                console.print(f"\n✅ Node group creation initiated")
+                console.print(f"📋 Node group name: {nodegroup_info['nodegroup_name']}")
+                console.print(f"📋 Node group ARN: {nodegroup_info['nodegroup_arn']}")
+                console.print(f"💻 Instance types: {nodegroup_info['instance_types']}")
+                console.print(f"📊 Scaling config: {nodegroup_info['scaling_config']}")
+            elif 'nodegroup_error' in cluster_info:
+                console.print(f"\n⚠️  Node group creation failed: {cluster_info['nodegroup_error']}")
+                console.print(f"💡 You can create it manually later using: k8s-helper create-nodegroup {name}")
+            elif 'node_group_name' in cluster_info:
+                console.print(f"\n📋 Node group will be created: {cluster_info['node_group_name']}")
+                console.print(f"💡 Create it after cluster is active: k8s-helper create-nodegroup {name}")
+        
         if wait:
             console.print("⏳ Waiting for cluster to become active...")
-            with console.status("Waiting for cluster to be ready..."):
-                if eks_client.wait_for_cluster_active(name):
-                    console.print("✅ EKS cluster is now active!")
-                    
-                    # Show cluster status
-                    status = eks_client.get_cluster_status(name)
-                    console.print(f"🔗 Endpoint: {status['endpoint']}")
+            if eks_client.wait_for_cluster_active(name):
+                console.print("✅ EKS cluster is now active!")
+                
+                # Show cluster status
+                status = eks_client.get_cluster_status(name)
+                console.print(f"🔗 Endpoint: {status['endpoint']}")
+                
+                # If node group was created, wait for it too
+                if create_nodegroup and 'nodegroup_info' in cluster_info:
+                    nodegroup_name = cluster_info['nodegroup_info']['nodegroup_name']
+                    console.print(f"⏳ Waiting for node group {nodegroup_name} to become active...")
+                    if eks_client.wait_for_nodegroup_active(name, nodegroup_name):
+                        console.print("✅ Node group is now active!")
+                        console.print("🎉 Cluster is ready with worker nodes!")
+                    else:
+                        console.print("❌ Timeout waiting for node group to become active")
+                elif create_nodegroup and not wait:
+                    # Create node group now that cluster is active
+                    nodegroup_name = cluster_info.get('node_group_name') or f"{name}-nodegroup"
+                    console.print(f"🔧 Creating node group: {nodegroup_name}")
+                    try:
+                        nodegroup_info = eks_client.create_nodegroup(
+                            cluster_name=name,
+                            nodegroup_name=nodegroup_name,
+                            instance_types=instance_type_list,
+                            ami_type=ami_type,
+                            capacity_type=capacity_type,
+                            scaling_config=scaling_config
+                            # No SSH key for automatic creation
+                        )
+                        console.print(f"✅ Node group creation initiated: {nodegroup_name}")
+                        console.print(f"📋 Node group ARN: {nodegroup_info['nodegroup_arn']}")
+                        
+                        console.print(f"⏳ Waiting for node group to become active...")
+                        if eks_client.wait_for_nodegroup_active(name, nodegroup_name):
+                            console.print("✅ Node group is now active!")
+                            console.print("🎉 Cluster is ready with worker nodes!")
+                        else:
+                            console.print("❌ Timeout waiting for node group to become active")
+                    except Exception as e:
+                        console.print(f"❌ Failed to create node group: {e}")
+                
+                # Show next steps
+                console.print(f"\n🚀 Next steps:")
+                console.print(f"   1. Configure kubectl: aws eks update-kubeconfig --name {name} --region {region}")
+                if create_nodegroup:
+                    console.print(f"   2. Verify nodes: kubectl get nodes")
+                    console.print(f"   3. Verify connection: kubectl get svc")
+                    console.print(f"   4. Deploy applications: k8s-helper apply <app-name> <image>")
                 else:
-                    console.print("❌ Timeout waiting for cluster to become active")
+                    console.print(f"   2. Create node group: k8s-helper create-nodegroup {name}")
+                    console.print(f"   3. Verify connection: kubectl get svc")
+                    console.print(f"   4. Deploy applications: k8s-helper apply <app-name> <image>")
+            else:
+                console.print("❌ Timeout waiting for cluster to become active")
         else:
-            console.print("💡 Use 'aws eks update-kubeconfig --name {name} --region {region}' to configure kubectl")
+            console.print(f"💡 Use 'aws eks update-kubeconfig --name {name} --region {region}' to configure kubectl")
     
     except Exception as e:
-        console.print(f"❌ Failed to create EKS cluster: {e}")
+        error_message = str(e)
+        console.print(f"❌ Failed to create EKS cluster: {error_message}")
+        
+        # Provide helpful guidance based on error type
+        if "Need at least 2 subnets" in error_message:
+            console.print("\n🛠️  Troubleshooting:")
+            console.print("   • EKS requires subnets in at least 2 availability zones")
+            console.print("   • Check your VPC configuration in the AWS Console")
+            console.print("   • Ensure you have subnets in different AZs")
+            console.print("   • The tool will attempt to create subnets if none exist")
+        elif "credentials not found" in error_message:
+            console.print("\n🛠️  Troubleshooting:")
+            console.print("   • Configure AWS credentials: aws configure")
+            console.print("   • Or set environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
+            console.print("   • Ensure you have EKS permissions")
+        elif "VPC" in error_message:
+            console.print("\n🛠️  Troubleshooting:")
+            console.print("   • Check your VPC configuration")
+            console.print("   • Ensure you have a default VPC or create one")
+            console.print("   • Verify subnet CIDR ranges don't overlap")
 
+@app.command()
+def create_nodegroup(
+    cluster_name: str = typer.Argument(..., help="EKS cluster name"),
+    nodegroup_name: str = typer.Argument(..., help="Node group name"),
+    region: str = typer.Option("us-west-2", "--region", "-r", help="AWS region"),
+    instance_types: str = typer.Option("t3.medium", "--instance-types", help="EC2 instance types (comma-separated)"),
+    min_size: int = typer.Option(1, "--min-size", help="Minimum number of nodes"),
+    max_size: int = typer.Option(3, "--max-size", help="Maximum number of nodes"),
+    desired_size: int = typer.Option(2, "--desired-size", help="Desired number of nodes"),
+    ami_type: str = typer.Option("AL2_x86_64", "--ami-type", help="AMI type for nodes"),
+    capacity_type: str = typer.Option("ON_DEMAND", "--capacity-type", help="Capacity type: ON_DEMAND or SPOT"),
+    ssh_key: Optional[str] = typer.Option(None, "--ssh-key", help="EC2 SSH key name for remote access"),
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for node group to be ready")
+):
+    """Create an EKS managed node group"""
+    if not validate_name(cluster_name):
+        console.print(f"❌ Invalid cluster name: {cluster_name}")
+        return
+    
+    if not validate_name(nodegroup_name):
+        console.print(f"❌ Invalid node group name: {nodegroup_name}")
+        return
+    
+    try:
+        from .core import EKSClient
+        
+        eks_client = EKSClient(region=region)
+        
+        # Parse instance types
+        instance_type_list = [t.strip() for t in instance_types.split(",")]
+        
+        scaling_config = {
+            "minSize": min_size,
+            "maxSize": max_size,
+            "desiredSize": desired_size
+        }
+        
+        console.print(f"🚀 Creating node group: {nodegroup_name}")
+        console.print(f"📋 For cluster: {cluster_name}")
+        console.print(f"📍 Region: {region}")
+        console.print(f"💻 Instance types: {instance_type_list}")
+        console.print(f"📊 Scaling: {min_size}-{max_size} nodes (desired: {desired_size})")
+        console.print(f"🛠️  AMI Type: {ami_type}")
+        console.print(f"⚡ Capacity Type: {capacity_type}")
+        
+        # Check if cluster exists and is active
+        try:
+            cluster_status = eks_client.get_cluster_status(cluster_name)
+            if cluster_status['status'] != 'ACTIVE':
+                console.print(f"❌ Cluster {cluster_name} is not active (status: {cluster_status['status']})")
+                console.print("💡 Wait for cluster to become active before creating node group")
+                return
+        except Exception as e:
+            console.print(f"❌ Cluster {cluster_name} not found: {e}")
+            return
+        
+        with console.status("Creating node group..."):
+            nodegroup_info = eks_client.create_nodegroup(
+                cluster_name=cluster_name,
+                nodegroup_name=nodegroup_name,
+                instance_types=instance_type_list,
+                ami_type=ami_type,
+                capacity_type=capacity_type,
+                scaling_config=scaling_config,
+                ssh_key=ssh_key
+            )
+        
+        console.print(f"✅ Node group creation initiated")
+        console.print(f"📋 Node group ARN: {nodegroup_info['nodegroup_arn']}")
+        console.print(f"🕐 Created at: {nodegroup_info['created_at']}")
+        console.print(f"💻 Instance types: {nodegroup_info['instance_types']}")
+        console.print(f"📊 Scaling config: {nodegroup_info['scaling_config']}")
+        
+        if wait:
+            console.print("⏳ Waiting for node group to become active...")
+            if eks_client.wait_for_nodegroup_active(cluster_name, nodegroup_name):
+                console.print("✅ Node group is now active!")
+                console.print("🎉 You can now deploy workloads!")
+                
+                # Show next steps
+                console.print(f"\n🚀 Next steps:")
+                console.print(f"   1. Verify nodes: kubectl get nodes")
+                console.print(f"   2. Deploy applications: k8s-helper apply <app-name> <image>")
+            else:
+                console.print("❌ Timeout waiting for node group to become active")
+        else:
+            console.print(f"💡 Use 'kubectl get nodes' to check when nodes are ready")
+    
+    except Exception as e:
+        error_message = str(e)
+        console.print(f"❌ Failed to create node group: {error_message}")
+        
+        # Provide helpful guidance based on error type
+        if "Node group role" in error_message:
+            console.print("\n🛠️  Troubleshooting:")
+            console.print("   • The tool will automatically create required IAM roles")
+            console.print("   • Ensure you have IAM permissions to create roles")
+            console.print("   • Check AWS IAM console for existing roles")
+        elif "subnets" in error_message:
+            console.print("\n🛠️  Troubleshooting:")
+            console.print("   • Node groups require valid subnets")
+            console.print("   • Ensure cluster subnets are properly configured")
+            console.print("   • Check VPC and subnet configuration")
 
+@app.command()
+def list_nodegroups(
+    cluster_name: str = typer.Argument(..., help="EKS cluster name"),
+    region: str = typer.Option("us-west-2", "--region", "-r", help="AWS region"),
+    output: str = output_option
+):
+    """List node groups for an EKS cluster"""
+    if not validate_name(cluster_name):
+        console.print(f"❌ Invalid cluster name: {cluster_name}")
+        return
+    
+    try:
+        from .core import EKSClient
+        
+        eks_client = EKSClient(region=region)
+        
+        with console.status("Fetching node groups..."):
+            nodegroups = eks_client.list_nodegroups(cluster_name)
+        
+        if not nodegroups:
+            console.print(f"📋 No node groups found for cluster: {cluster_name}")
+            console.print(f"💡 Create one with: k8s-helper create-nodegroup {cluster_name} <nodegroup-name>")
+            return
+        
+        if output == "table":
+            table = Table(title=f"Node Groups for {cluster_name}")
+            table.add_column("Name", style="cyan")
+            table.add_column("Status", style="green")
+            table.add_column("Instance Types", style="blue")
+            table.add_column("Capacity Type", style="yellow")
+            table.add_column("Scaling Config", style="magenta")
+            table.add_column("Created", style="white")
+            
+            for ng in nodegroups:
+                scaling = f"{ng['scaling_config']['minSize']}-{ng['scaling_config']['maxSize']} (desired: {ng['scaling_config']['desiredSize']})"
+                table.add_row(
+                    ng['name'],
+                    ng['status'],
+                    ', '.join(ng['instance_types']),
+                    ng['capacity_type'],
+                    scaling,
+                    format_age(ng['created_at'])
+                )
+            
+            console.print(table)
+        elif output == "json":
+            console.print(format_json_output(nodegroups))
+        elif output == "yaml":
+            console.print(format_yaml_output(nodegroups))
+    
+    except Exception as e:
+        console.print(f"❌ Failed to list node groups: {e}")
 # ======================
 # SECRET COMMANDS
 # ======================
